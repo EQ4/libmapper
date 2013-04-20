@@ -72,11 +72,11 @@ void mapper_monitor_free(mapper_monitor mon)
 
 int mapper_monitor_poll(mapper_monitor mon, int block_ms)
 {
-    int admin_count = mapper_admin_poll(mon->admin);
+    int admin_count = mapper_admin_poll(mon->admin, 1);
     if (block_ms) {
         double then = get_current_time();
         while ((get_current_time() - then)*1000 < block_ms) {
-            admin_count += mapper_admin_poll(mon->admin);
+            admin_count += mapper_admin_poll(mon->admin, 1);
 #ifdef WIN32
             Sleep(block_ms);
 #else

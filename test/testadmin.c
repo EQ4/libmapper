@@ -38,7 +38,7 @@ int test_admin()
 
     while (!my_admin->registered) {
         usleep(10000);
-        mapper_admin_poll(my_admin);
+        mapper_admin_poll(my_admin, 1);
     }
 
     printf("Using port %d.\n", my_admin->port);
@@ -48,7 +48,7 @@ int test_admin()
     wait = 500;
     while (wait-- >= 0) {
         usleep(10000);
-        mapper_admin_poll(my_admin);
+        mapper_admin_poll(my_admin, 1);
     }
 
     mdev_free(my_device);

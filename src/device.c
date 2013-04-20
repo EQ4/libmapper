@@ -18,18 +18,6 @@
 #include <pthread.h>
 #endif
 
-/*! Internal function to get the current time. */
-static double get_current_time()
-{
-#ifdef HAVE_GETTIMEOFDAY
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (double) tv.tv_sec + tv.tv_usec / 1000000.0;
-#else
-#error No timing method known on this platform.
-#endif
-}
-
 //! Allocate and initialize a mapper device.
 mapper_device mdev_new(const char *name_prefix, int port,
                        mapper_admin admin)
@@ -804,45 +792,64 @@ mapper_signal mdev_get_output_by_index(mapper_device md, int index)
 
 int mdev_poll(mapper_device md, int block_ms)
 {
-    int admin_count = mapper_admin_poll(md->admin);
-    int count = 0;
+    int admin_count = 0, device_count = 0;
+    struct timeval timeout = { block_ms * 0.001, (block_ms * 1000) % 1000000 };
 
-    if (md->server) {
+    md->flags &= ~FLAGS_SENT_ALL_DEVICE_MESSAGES;
 
-        /* If a timeout is specified, loop until the time is up. */
-        if (block_ms)
-        {
-            double then = get_current_time();
-            int left_ms = block_ms;
-            while (left_ms > 0)
-            {
-                if (lo_server_recv_noblock(md->server, left_ms))
-                    count++;
-                double elapsed = get_current_time() - then;
-                left_ms = block_ms - (int)(elapsed*1000);
-            }
+    if (block_ms) {
+        struct timeval now, then;
+        gettimeofday(&now, NULL);
+        then.tv_sec = now.tv_sec + block_ms * 0.001;
+        then.tv_usec = now.tv_usec + block_ms * 1000;
+        if (then.tv_usec > 1000000) {
+            then.tv_sec++;
+            then.tv_usec %= 1000000;
         }
 
-        /* When done, or if non-blocking, check for remaining messages
-         * up to a proportion of the number of input
-         * signals. Arbitrarily choosing 1 for now, since we don't
-         * support "combining" multiple incoming streams, so there's
-         * no point.  Perhaps if this is supported in the future it
-         * can be a heuristic based on a recent number of messages per
-         * channel per poll. */
-        while (count < (md->n_inputs + md->n_output_callbacks)*1
-               && lo_server_recv_noblock(md->server, 0))
-            count++;
-    }
-    else if (block_ms) {
-#ifdef WIN32
-        Sleep(block_ms);
-#else
-        usleep(block_ms * 1000);
-#endif
+        fd_set fdr;
+        FD_ZERO(&fdr);
+        int dev_fd = -1, admin_fd = lo_server_get_socket_fd(md->admin->admin_server);
+        int nfds = admin_fd + 1;
+        
+        FD_SET(admin_fd, &fdr);
+        dev_fd = lo_server_get_socket_fd(md->server);
+        FD_SET(dev_fd, &fdr);
+        if (dev_fd > admin_fd)
+            nfds = dev_fd + 1;
+
+        while (timercmp(&now, &then, <)) {
+            if (select(nfds, &fdr, 0, 0, &timeout) > 0) {
+                if (FD_ISSET(dev_fd, &fdr)) {
+                    lo_server_recv_noblock(md->server, 0);
+                    device_count++;
+                }
+                if (FD_ISSET(admin_fd, &fdr)) {
+                    lo_server_recv_noblock(md->admin->admin_server, 0);
+                    admin_count++;
+                    mapper_admin_poll(md->admin, 0);
+                }
+            }
+            gettimeofday(&now, NULL);
+            timersub(&then, &now, &timeout);
+        }
     }
 
-    return admin_count + count;
+    // need to call mapper_admin_poll periodically for sync output / metadata reporting
+    admin_count += mapper_admin_poll(md->admin, block_ms ? 0 : 1);
+
+    /* When done, or if non-blocking, check for remaining messages
+     * up to a proportion of the number of input
+     * signals. Arbitrarily choosing 1 for now, since we don't
+     * support "combining" multiple incoming streams, so there's
+     * no point.  Perhaps if this is supported in the future it
+     * can be a heuristic based on a recent number of messages per
+     * channel per poll. */
+    while (device_count < (md->n_inputs + md->n_output_callbacks)*1
+           && lo_server_recv_noblock(md->server, 0))
+        device_count++;
+
+    return admin_count + device_count;
 }
 
 int mdev_num_fds(mapper_device md)
@@ -865,7 +872,7 @@ int mdev_get_fds(mapper_device md, int *fds, int num)
 void mdev_service_fd(mapper_device md, int fd)
 {
     if (fd == lo_server_get_socket_fd(md->admin->admin_server))
-        mapper_admin_poll(md->admin);
+        mapper_admin_poll(md->admin, 1);
     else if (md->server
              && fd == lo_server_get_socket_fd(md->server))
         lo_server_recv_noblock(md->server, 0);

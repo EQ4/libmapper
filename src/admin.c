@@ -500,15 +500,17 @@ void mapper_admin_remove_monitor(mapper_admin admin, mapper_monitor mon)
 /*! This is the main function to be called once in a while from a
  *  program so that the admin bus can be automatically managed.
  */
-int mapper_admin_poll(mapper_admin admin)
+int mapper_admin_poll(mapper_admin admin, int read_socket)
 {
     int count = 0, status, i = 0;
 
-    if (admin->device)
-        admin->device->flags &= ~FLAGS_SENT_ALL_DEVICE_MESSAGES;
+    if (read_socket) {
+        if (admin->device)
+            admin->device->flags &= ~FLAGS_SENT_ALL_DEVICE_MESSAGES;
 
-    while (count < 10 && lo_server_recv_noblock(admin->admin_server, 0)) {
-        count++;
+        while (count < 10 && lo_server_recv_noblock(admin->admin_server, 0)) {
+            count++;
+        }
     }
 
     if (!admin->device)
