@@ -18,11 +18,13 @@ mapper_receiver mapper_receiver_new(mapper_device device, const char *host,
     sprintf(str, "%d", port);
     r->props.src_addr = lo_address_new(host, str);
     r->props.src_name = strdup(name);
+    r->props.src_name_hash = crc32(0L, (const Bytef *)name, strlen(name));
+    r->props.dest_name = strdup(mdev_name(device));
     if (default_scope) {
         r->props.num_scopes = 1;
         r->props.scope_names = (char **) malloc(sizeof(char *));
         r->props.scope_names[0] = strdup(name);
-        r->props.scope_hashes = (int *) malloc(sizeof(int));
+        r->props.scope_hashes = (uint32_t *) malloc(sizeof(uint32_t));
         r->props.scope_hashes[0] = crc32(0L, (const Bytef *)name, strlen(name));;
     }
     else {
@@ -49,6 +51,8 @@ void mapper_receiver_free(mapper_receiver r)
             free(r->props.src_name);
         if (r->props.src_addr)
             lo_address_free(r->props.src_addr);
+        if (r->props.dest_name)
+            free(r->props.dest_name);
         while (r->signals && r->signals->connections) {
             // receiver_signal is freed with last child connection
             mapper_receiver_remove_connection(r, r->signals->connections);
@@ -416,7 +420,7 @@ int mapper_receiver_remove_connection(mapper_receiver r,
                         if (rs->signal->handler)
                             rs->signal->handler(rs->signal, &rs->signal->props,
                                                 id_map->map->local, 0, 0, 0);
-                        // TODO: call instance management handler with IN_DISCONNECTED
+                        // TODO: call instance event handler with IN_DISCONNECTED
                         continue;
                     }
                 }
@@ -490,7 +494,8 @@ int mapper_receiver_add_scope(mapper_receiver r, const char *scope)
     if (!scope)
         return 1;
     // Check if scope is already stored for this receiver
-    int i, hash = crc32(0L, (const Bytef *)scope, strlen(scope));
+    int i;
+    uint32_t hash = crc32(0L, (const Bytef *)scope, strlen(scope));
     mapper_db_link props = &r->props;
     for (i=0; i<props->num_scopes; i++)
         if (props->scope_hashes[i] == hash)
@@ -499,14 +504,15 @@ int mapper_receiver_add_scope(mapper_receiver r, const char *scope)
     i = ++props->num_scopes;
     props->scope_names = realloc(props->scope_names, i * sizeof(char *));
     props->scope_names[i-1] = strdup(scope);
-    props->scope_hashes = realloc(props->scope_hashes, i * sizeof(int));
+    props->scope_hashes = realloc(props->scope_hashes, i * sizeof(uint32_t));
     props->scope_hashes[i-1] = hash;
     return 0;
 }
 
 void mapper_receiver_remove_scope(mapper_receiver receiver, const char *scope)
 {
-    int i, j, hash;
+    int i, j;
+    uint32_t hash;
     mapper_device md = receiver->device;
 
     if (!scope)
@@ -526,7 +532,7 @@ void mapper_receiver_remove_scope(mapper_receiver receiver, const char *scope)
             props->scope_names = realloc(props->scope_names,
                                          props->num_scopes * sizeof(char *));
             props->scope_hashes = realloc(props->scope_hashes,
-                                          props->num_scopes * sizeof(int));
+                                          props->num_scopes * sizeof(uint32_t));
             return;
         }
     }
@@ -553,7 +559,7 @@ void mapper_receiver_remove_scope(mapper_receiver receiver, const char *scope)
                     rs->signal->handler(rs->signal, &rs->signal->props,
                                         map->local, 0, 0, 0);
                 }
-                // TODO: call instance management handler if defined
+                // TODO: call instance event handler if defined
                 //msig_release_instance_internal(rs->signal, i, 0, MAPPER_NOW);
                 continue;
             }
@@ -569,11 +575,11 @@ void mapper_receiver_remove_scope(mapper_receiver receiver, const char *scope)
      * automatically once all referring instances have been released. */
 }
 
-int mapper_receiver_in_scope(mapper_receiver r, int id)
+int mapper_receiver_in_scope(mapper_receiver r, uint32_t name_hash)
 {
     int i;
     for (i=0; i<r->props.num_scopes; i++)
-        if (r->props.scope_hashes[i] == id)
+        if (r->props.scope_hashes[i] == name_hash)
             return 1;
     return 0;
 }

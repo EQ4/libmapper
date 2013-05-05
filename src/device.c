@@ -123,6 +123,29 @@ void mdev_free(mapper_device md)
     free(md);
 }
 
+void mdev_registered(mapper_device md)
+{
+    int i, j;
+    /* Add device name to signals. Also add device name hash to
+     * locally-activated signal instances. */
+    for (i = 0; i < md->n_inputs; i++) {
+        md->inputs[i]->props.device_name = mdev_name(md);
+        for (j = 0; j < md->inputs[i]->id_map_length; j++) {
+            if (md->inputs[i]->id_maps[j].map &&
+                md->inputs[i]->id_maps[j].map->group == 0)
+                md->inputs[i]->id_maps[j].map->group = md->admin->name_hash;
+        }
+    }
+    for (i = 0; i < md->n_outputs; i++) {
+        md->outputs[i]->props.device_name = mdev_name(md);
+        for (j = 0; j < md->outputs[i]->id_map_length; j++) {
+            if (md->outputs[i]->id_maps[j].map &&
+                md->outputs[i]->id_maps[j].map->group == 0)
+                md->outputs[i]->id_maps[j].map->group = md->admin->name_hash;
+        }
+    }
+}
+
 #ifdef __GNUC__
 // when gcc inlines this with O2 or O3, it causes a crash. bug?
 __attribute__ ((noinline))
@@ -270,10 +293,10 @@ static int handler_signal_instance(const char *path, const char *types,
     if (types[2] == LO_NIL) {
         sig->id_maps[index].status |= IN_RELEASED_REMOTELY;
         map->refcount_remote--;
-        if (sig->instance_management_handler
-            && (sig->instance_management_flags & IN_UPSTREAM_RELEASE)) {
-            sig->instance_management_handler(sig, &sig->props, map->local,
-                                             IN_UPSTREAM_RELEASE, &tt);
+        if (sig->instance_event_handler
+            && (sig->instance_event_flags & IN_UPSTREAM_RELEASE)) {
+            sig->instance_event_handler(sig, &sig->props, map->local,
+                                        IN_UPSTREAM_RELEASE, &tt);
         }
         else if (sig->handler) {
             sig->handler(sig, &sig->props, map->local, dataptr, count, &tt);
@@ -315,8 +338,8 @@ static int handler_instance_release_request(const char *path, const char *types,
     if (!md)
         return 0;
 
-    if (!sig->instance_management_handler ||
-        !(sig->instance_management_flags & IN_DOWNSTREAM_RELEASE))
+    if (!sig->instance_event_handler ||
+        !(sig->instance_event_flags & IN_DOWNSTREAM_RELEASE))
         return 0;
 
     lo_timetag tt = lo_message_get_timestamp(msg);
@@ -325,9 +348,9 @@ static int handler_instance_release_request(const char *path, const char *types,
     if (index < 0)
         return 0;
 
-    if (sig->instance_management_handler) {
-        sig->instance_management_handler(sig, &sig->props, sig->id_maps[index].map->local,
-                                         IN_DOWNSTREAM_RELEASE, &tt);
+    if (sig->instance_event_handler) {
+        sig->instance_event_handler(sig, &sig->props, sig->id_maps[index].map->local,
+                                    IN_DOWNSTREAM_RELEASE, &tt);
     }
 
     return 0;
@@ -655,8 +678,8 @@ void mdev_remove_output(mapper_device md, mapper_signal sig)
         snprintf(str1, 1024, "%s/got", sig->props.name);
         lo_server_del_method(md->server, str1, NULL);
     }
-    if (sig->instance_management_handler &&
-        (sig->instance_management_flags & IN_DOWNSTREAM_RELEASE)) {
+    if (sig->instance_event_handler &&
+        (sig->instance_event_flags & IN_DOWNSTREAM_RELEASE)) {
         lo_server_del_method(md->server, sig->props.name, "iiF");
     }
 
@@ -1185,8 +1208,8 @@ void mdev_start_server(mapper_device md, int starting_port)
                                      handler_signal_instance, (void *) (md->outputs[i]));
                 md->n_output_callbacks ++;
             }
-            if (md->outputs[i]->instance_management_handler &&
-                (md->outputs[i]->instance_management_flags & IN_DOWNSTREAM_RELEASE)) {
+            if (md->outputs[i]->instance_event_handler &&
+                (md->outputs[i]->instance_event_flags & IN_DOWNSTREAM_RELEASE)) {
                 lo_server_add_method(md->server,
                                      md->outputs[i]->props.name,
                                      "iiF",
@@ -1277,4 +1300,19 @@ lo_server mdev_get_lo_server(mapper_device md)
 void mdev_timetag_now(mapper_device dev, mapper_timetag_t *timetag)
 {
     mapper_clock_now(&dev->admin->clock, timetag);
+}
+
+void mdev_add_link_callback(mapper_device dev,
+                            mapper_device_link_handler *h, void *user)
+{
+    dev->link_cb = h;
+    dev->link_cb_userdata = user;
+}
+
+void mdev_add_connection_callback(mapper_device dev,
+                                  mapper_device_connection_handler *h,
+                                  void *user)
+{
+    dev->connection_cb = h;
+    dev->connection_cb_userdata = user;
 }
