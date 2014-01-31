@@ -18,6 +18,19 @@
 #include <pthread.h>
 #endif
 
+#ifdef WIN32
+void timersub(struct timeval *a, struct timeval *b, struct timeval *res)
+{
+    res->tv_sec = a->tv_sec - b->tv_sec;
+    if (a->tv_usec >= b->tv_usec)
+        res->tv_usec = a->tv_usec - b->tv_usec;
+    else {
+        res->tv_sec--;
+        res->tv_usec = 999999 - b->tv_usec + a->tv_usec;
+    }
+}
+#endif
+
 //! Allocate and initialize a mapper device.
 mapper_device mdev_new(const char *name_prefix, int port,
                        mapper_admin admin)
@@ -874,6 +887,8 @@ int mdev_poll(mapper_device md, int block_ms)
                 }
             }
             gettimeofday(&now, NULL);
+
+            // not necessary in Linux since timeout is updated by select()
             timersub(&then, &now, &timeout);
         }
     }
