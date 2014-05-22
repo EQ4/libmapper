@@ -148,8 +148,12 @@ void mdev_free(mapper_device md)
         free(md->props.name);
     if (md->props.host)
         free(md->props.host);
-    if (md->admin && md->own_admin)
-        mapper_admin_free(md->admin);
+    if (md->admin) {
+        if (md->own_admin)
+            mapper_admin_free(md->admin);
+        else
+            md->admin->device = 0;
+    }
     if (md->server)
         lo_server_free(md->server);
     free(md);
@@ -226,6 +230,11 @@ static int handler_signal(const char *path, const char *types,
         return 0;
 
     mapper_signal_instance si = sig->id_maps[index].instance;
+
+    // TODO: optionally discard out-of-order messages
+    // requires timebase sync for many-to-one connections or local updates
+    //    if (sig->discard_out_of_order && out_of_order(si->timetag, tt))
+    //        return 0;
 
     if (types[0] == LO_BLOB) {
         dataptr = lo_blob_dataptr((lo_blob)argv[0]);
@@ -318,6 +327,11 @@ static int handler_signal_instance(const char *path, const char *types,
 
     mapper_signal_instance si = sig->id_maps[index].instance;
     map = sig->id_maps[index].map;
+
+    // TODO: optionally discard out-of-order messages
+    // requires timebase sync for many-to-one connections or local updates
+    //    if (sig->discard_out_of_order && out_of_order(si->timetag, tt))
+    //        return 0;
 
     si->timetag.sec = tt.sec;
     si->timetag.frac = tt.frac;
@@ -1319,11 +1333,16 @@ int mdev_ready(mapper_device device)
     return device->registered;
 }
 
-void mdev_set_property(mapper_device dev, const char *property,
-                       lo_type type, lo_arg *value)
+mapper_db_device mdev_properties(mapper_device dev)
 {
-    mapper_table_add_or_update_osc_value(dev->props.extra,
-                                         property, type, value);
+    return &dev->props;
+}
+
+void mdev_set_property(mapper_device dev, const char *property,
+                       char type, void *value, int length)
+{
+    mapper_table_add_or_update_typed_value(dev->props.extra, property,
+                                           type, value, length);
 }
 
 void mdev_remove_property(mapper_device dev, const char *property)
