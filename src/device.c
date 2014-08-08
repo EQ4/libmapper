@@ -81,7 +81,8 @@ void mdev_free(mapper_device md)
 
     if (md->registered) {
         // A registered device must tell the network it is leaving.
-        mapper_admin_send(md->admin, ADM_LOGOUT, 0, "s", mdev_name(md));
+        mapper_admin_set_bundle_dest_bus(md->admin);
+        mapper_admin_bundle_message(md->admin, ADM_LOGOUT, 0, "s", mdev_name(md));
     }
 
     // First release active instances
@@ -529,6 +530,12 @@ mapper_signal mdev_add_input(mapper_device md, const char *name, int length,
     free(type_string);
     free(signal_get);
 
+    if (md->registered) {
+        // Notify subscribers
+        mapper_admin_set_bundle_dest_subscribers(md->admin, SUB_DEVICE_INPUTS);
+        mapper_admin_send_signal(md->admin, md, sig);
+    }
+
     return sig;
 }
 
@@ -550,6 +557,13 @@ mapper_signal mdev_add_output(mapper_device md, const char *name, int length,
 
     md->outputs[md->props.n_outputs - 1] = sig;
     sig->device = md;
+
+    if (md->registered) {
+        // Notify subscribers
+        mapper_admin_set_bundle_dest_subscribers(md->admin, SUB_DEVICE_OUTPUTS);
+        mapper_admin_send_signal(md->admin, md, sig);
+    }
+
     return sig;
 }
 
@@ -678,12 +692,14 @@ void mdev_remove_input(mapper_device md, mapper_signal sig)
         while (rs) {
             if (rs->signal == sig) {
                 // need to disconnect?
+                mapper_admin_set_bundle_dest_mesh(md->admin, r->admin_addr);
                 mapper_connection c = rs->connections;
                 while (c) {
                     snprintf(str1, 1024, "%s%s", r->props.src_name,
                              c->props.src_name);
-                    mapper_admin_send(md->admin, ADM_DISCONNECT, 0, "ss",
-                                      str1, str2);
+                    // TODO: send directly to source device?
+                    mapper_admin_bundle_message(md->admin, ADM_DISCONNECT, 0,
+                                                "ss", str1, str2);
                     mapper_connection temp = c->next;
                     mapper_receiver_remove_connection(r, c);
                     c = temp;
@@ -693,6 +709,12 @@ void mdev_remove_input(mapper_device md, mapper_signal sig)
             rs = rs->next;
         }
         r = r->next;
+    }
+
+    if (md->registered) {
+        // Notify subscribers
+        mapper_admin_set_bundle_dest_subscribers(md->admin, SUB_DEVICE_INPUTS);
+        mapper_admin_send_signal_removed(md->admin, md, sig);
     }
 
     md->props.n_inputs --;
@@ -730,12 +752,14 @@ void mdev_remove_output(mapper_device md, mapper_signal sig)
         while (rs) {
             if (rs->signal == sig) {
                 // need to disconnect?
+                mapper_admin_set_bundle_dest_mesh(md->admin, r->admin_addr);
                 mapper_connection c = rs->connections;
                 while (c) {
                     snprintf(str2, 1024, "%s%s", r->props.dest_name,
                              c->props.dest_name);
-                    mapper_admin_send(md->admin, ADM_DISCONNECTED, 0, "ss",
-                                      str1, str2);
+                    // TODO: send directly to source device?
+                    mapper_admin_bundle_message(md->admin, ADM_DISCONNECTED, 0,
+                                                "ss", str1, str2);
                     mapper_connection temp = c->next;
                     mapper_router_remove_connection(r, c);
                     c = temp;
@@ -745,6 +769,12 @@ void mdev_remove_output(mapper_device md, mapper_signal sig)
             rs = rs->next;
         }
         r = r->next;
+    }
+
+    if (md->registered) {
+        // Notify subscribers
+        mapper_admin_set_bundle_dest_subscribers(md->admin, SUB_DEVICE_OUTPUTS);
+        mapper_admin_send_signal_removed(md->admin, md, sig);
     }
 
     md->props.n_outputs --;
@@ -879,26 +909,40 @@ int mdev_poll(mapper_device md, int block_ms)
 
         fd_set fdr;
         FD_ZERO(&fdr);
-        int dev_fd = -1, admin_fd = lo_server_get_socket_fd(md->admin->admin_server);
-        int nfds = admin_fd + 1;
-        
-        FD_SET(admin_fd, &fdr);
-        dev_fd = lo_server_get_socket_fd(md->server);
-        FD_SET(dev_fd, &fdr);
-        if (dev_fd > admin_fd)
+        int bus_fd = lo_server_get_socket_fd(md->admin->bus_server);
+        int nfds = bus_fd + 1;
+        int mesh_fd = lo_server_get_socket_fd(md->admin->mesh_server);
+        if (mesh_fd > bus_fd)
+            nfds = mesh_fd + 1;
+        int dev_fd = lo_server_get_socket_fd(md->server);
+        if (dev_fd >= nfds)
             nfds = dev_fd + 1;
 
+        FD_SET(bus_fd, &fdr);
+        FD_SET(mesh_fd, &fdr);
+        FD_SET(dev_fd, &fdr);
+
         while (timercmp(&now, &then, <)) {
+            int admin_poll = 0;
             if (select(nfds, &fdr, 0, 0, &timeout) > 0) {
                 if (FD_ISSET(dev_fd, &fdr)) {
                     lo_server_recv_noblock(md->server, 0);
                     device_count++;
                 }
-                if (FD_ISSET(admin_fd, &fdr)) {
-                    lo_server_recv_noblock(md->admin->admin_server, 0);
+                if (FD_ISSET(bus_fd, &fdr)) {
+                    md->flags &= ~FLAGS_SENT_ALL_DEVICE_MESSAGES;
+                    lo_server_recv_noblock(md->admin->bus_server, 0);
                     admin_count++;
-                    mapper_admin_poll(md->admin, 0);
+                    admin_poll = 1;
                 }
+                if (FD_ISSET(mesh_fd, &fdr)) {
+                    md->flags &= ~FLAGS_SENT_ALL_DEVICE_MESSAGES;
+                    lo_server_recv_noblock(md->admin->mesh_server, 0);
+                    admin_count++;
+                    admin_poll = 1;
+                }
+                if (admin_poll)
+                    mapper_admin_poll(md->admin, 0);
             }
             gettimeofday(&now, NULL);
 
@@ -921,33 +965,38 @@ int mdev_poll(mapper_device md, int block_ms)
            && lo_server_recv_noblock(md->server, 0))
         device_count++;
 
+    md->admin->msgs_recvd += admin_count;
     return admin_count + device_count;
 }
 
 int mdev_num_fds(mapper_device md)
 {
-    // One for the admin input, and one for the signal input.
-    return 2;
+    // Two for the admin inputs (bus and mesh), and one for the signal input.
+    return 3;
 }
 
 int mdev_get_fds(mapper_device md, int *fds, int num)
 {
     if (num > 0)
-        fds[0] = lo_server_get_socket_fd(md->admin->admin_server);
-    if (num > 1)
-        fds[1] = lo_server_get_socket_fd(md->server);
+        fds[0] = lo_server_get_socket_fd(md->admin->bus_server);
+    if (num > 1) {
+        fds[1] = lo_server_get_socket_fd(md->admin->mesh_server);
+        if (num > 2)
+            fds[2] = lo_server_get_socket_fd(md->server);
+        else
+            return 2;
+    }
     else
         return 1;
-    return 2;
+    return 3;
 }
 
 void mdev_service_fd(mapper_device md, int fd)
 {
-    if (fd == lo_server_get_socket_fd(md->admin->admin_server))
-        mapper_admin_poll(md->admin, 1);
-    else if (md->server
-             && fd == lo_server_get_socket_fd(md->server))
+    if (md->server && fd == lo_server_get_socket_fd(md->server))
         lo_server_recv_noblock(md->server, 0);
+    else
+        mapper_admin_poll(md->admin, fd);
 }
 
 void mdev_num_instances_changed(mapper_device md,
@@ -1341,6 +1390,13 @@ mapper_db_device mdev_properties(mapper_device dev)
 void mdev_set_property(mapper_device dev, const char *property,
                        char type, void *value, int length)
 {
+    if (strcmp(property, "name") == 0 ||
+        strcmp(property, "host") == 0 ||
+        strcmp(property, "port") == 0 ||
+        strcmp(property, "user_data") == 0) {
+        trace("Cannot set locked device property '%s'\n", property);
+        return;
+    }
     mapper_table_add_or_update_typed_value(dev->props.extra, property,
                                            type, value, length);
 }

@@ -1045,21 +1045,30 @@ mapper_db_signal msig_properties(mapper_signal sig)
 void msig_set_property(mapper_signal sig, const char *property,
                        char type, void *value, int length)
 {
-    if (strcmp(property, "name") == 0 ||
+    if (strcmp(property, "device_name") == 0 ||
+        strcmp(property, "name") == 0 ||
         strcmp(property, "type") == 0 ||
-        strcmp(property, "length") == 0)
+        strcmp(property, "length") == 0 ||
+        strcmp(property, "direction") == 0 ||
+        strcmp(property, "user_data") == 0) {
+        trace("Cannot set locked signal property '%s'\n", property);
         return;
+    }
 
     if (strcmp(property, "min") == 0 ||
         strcmp(property, "minimum") == 0) {
-        if (length == sig->props.length && type == sig->props.type)
+        if (!length || !value)
+            msig_set_minimum(sig, 0);
+        else if (length == sig->props.length && type == sig->props.type)
             msig_set_minimum(sig, value);
         // TODO: if types differ need to cast entire vector
         return;
     }
     else if (strcmp(property, "max") == 0 ||
              strcmp(property, "maximum") == 0) {
-        if (length == sig->props.length && type == sig->props.type)
+        if (!length || !value)
+            msig_set_maximum(sig, 0);
+        else if (length == sig->props.length && type == sig->props.type)
             msig_set_maximum(sig, value);
         // TODO: if types differ need to cast entire vector
         return;
@@ -1078,6 +1087,13 @@ void msig_set_property(mapper_signal sig, const char *property,
             sig->props.unit = realloc(sig->props.unit, strlen((char*)value)+1);
             strcpy(sig->props.unit, (char*)value);
         }
+        return;
+    }
+    else if (strcmp(property, "value") == 0) {
+        if (!length || !value)
+            msig_update(sig, 0, 0, MAPPER_NOW);
+        else if (length == sig->props.length || type == sig->props.type)
+            msig_update(sig, value, 1, MAPPER_NOW);
         return;
     }
 
