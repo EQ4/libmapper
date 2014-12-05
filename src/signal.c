@@ -48,10 +48,11 @@ static mapper_signal_instance find_instance_by_id(mapper_signal sig, int instanc
 
 mapper_signal msig_new(const char *name, int length, char type,
                        int is_output, const char *unit,
-                       void *minimum, void *maximum,
+                       void *minimum, void *maximum, int num_instances,
                        mapper_signal_update_handler *handler,
                        void *user_data)
 {
+    int i;
     if (length < 1) return 0;
     if (!name) return 0;
     if (type != 'f' && type != 'i' && type != 'd')
@@ -62,13 +63,24 @@ mapper_signal msig_new(const char *name, int length, char type,
 
     mapper_db_signal_init(&sig->props, is_output, type, length, name, unit);
     sig->handler = handler;
-    sig->props.num_instances = 0;
+    sig->has_complete_value = calloc(1, length / 8 + 1);
+    for (i = 0; i < length; i++) {
+        sig->has_complete_value[i/8] |= 1 << (i % 8);
+    }
     sig->props.user_data = user_data;
     msig_set_minimum(sig, minimum);
     msig_set_maximum(sig, maximum);
 
-    // Reserve one instance to start
-    msig_reserve_instances(sig, 1, 0, 0);
+    if (num_instances < 0) {
+        // this is a single-instance signal
+        sig->props.num_instances = 0;
+
+        // Reserve one instance to start
+        msig_reserve_instances(sig, 1, 0, 0);
+    }
+    else {
+        sig->props.num_instances = msig_reserve_instances(sig, num_instances, 0, 0);
+    }
 
     // Reserve one instance id map
     sig->id_map_length = 1;
@@ -90,8 +102,10 @@ void msig_free(mapper_signal sig)
     }
     free(sig->id_maps);
     for (i = 0; i < sig->props.num_instances; i++) {
-        if(sig->instances[i]->value)
+        if (sig->instances[i]->value)
             free(sig->instances[i]->value);
+        if (sig->instances[i]->has_value_flags)
+            free(sig->instances[i]->has_value_flags);
         free(sig->instances[i]);
     }
     free(sig->instances);
@@ -103,6 +117,8 @@ void msig_free(mapper_signal sig)
         free((char*)sig->props.name);
     if (sig->props.unit)
         free((char*)sig->props.unit);
+    if (sig->has_complete_value)
+        free(sig->has_complete_value);
     if (sig->props.extra)
         table_free(sig->props.extra, 1);
     free(sig);
@@ -532,6 +548,7 @@ static int msig_reserve_instance_internal(mapper_signal sig, int *id,
         (mapper_signal_instance) calloc(1, sizeof(struct _mapper_signal_instance));
     si = sig->instances[sig->props.num_instances];
     si->value = calloc(1, msig_vector_bytes(sig));
+    si->has_value_flags = calloc(1, sig->props.length / 8 + 1);
     si->has_value = 0;
 
     if (id)
@@ -594,7 +611,7 @@ int msig_reserve_instances(mapper_signal sig, int num, int *ids, void **user_dat
         count++;
     }
     if (highest != -1)
-        mdev_num_instances_changed(sig->device, sig, highest);
+        mdev_num_instances_changed(sig->device, sig, highest + 1);
     return count;
 }
 
@@ -789,6 +806,8 @@ void msig_remove_instance(mapper_signal sig, int instance_id)
 
     if (sig->instances[i]->value)
         free(sig->instances[i]->value);
+    if (sig->instances[i]->has_value_flags)
+        free(sig->instances[i]->has_value_flags);
     free(sig->instances[i]);
     i++;
     for (; i < sig->props.num_instances; i++) {
@@ -1155,4 +1174,57 @@ int msig_num_connections(mapper_signal sig)
         l = l->next;
     }
     return count;
+}
+
+void message_add_coerced_signal_instance_value(lo_message m,
+                                               mapper_signal sig,
+                                               mapper_signal_instance si,
+                                               int length,
+                                               const char type)
+{
+    int i;
+    int min_length = length < sig->props.length ?
+                     length : sig->props.length;
+
+    if (sig->props.type == 'f') {
+        float *v = (float *) si->value;
+        for (i = 0; i < min_length; i++) {
+            if (!si->has_value && !(si->has_value_flags[i/8] & 1 << (i % 8)))
+                lo_message_add_nil(m);
+            else if (type == 'f')
+                lo_message_add_float(m, v[i]);
+            else if (type == 'i')
+                lo_message_add_int32(m, (int)v[i]);
+            else if (type == 'd')
+                lo_message_add_double(m, (double)v[i]);
+        }
+    }
+    else if (sig->props.type == 'i') {
+        int *v = (int *) si->value;
+        for (i = 0; i < min_length; i++) {
+            if (!si->has_value && !(si->has_value_flags[i/8] & 1 << (i % 8)))
+                lo_message_add_nil(m);
+            else if (type == 'i')
+                lo_message_add_int32(m, v[i]);
+            else if (type == 'f')
+                lo_message_add_float(m, (float)v[i]);
+            else if (type == 'd')
+                lo_message_add_double(m, (double)v[i]);
+        }
+    }
+    else if (sig->props.type == 'd') {
+        double *v = (double *) si->value;
+        for (i = 0; i < min_length; i++) {
+            if (!si->has_value && !(si->has_value_flags[i/8] & 1 << (i % 8)))
+                lo_message_add_nil(m);
+            else if (type == 'd')
+                lo_message_add_double(m, (int)v[i]);
+            else if (type == 'i')
+                lo_message_add_int32(m, (int)v[i]);
+            else if (type == 'f')
+                lo_message_add_float(m, (float)v[i]);
+        }
+    }
+    for (i = min_length; i < length; i++)
+        lo_message_add_nil(m);
 }

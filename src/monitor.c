@@ -55,8 +55,10 @@ mapper_monitor mapper_monitor_new(mapper_admin admin, int autosubscribe_flags)
     mon->timeout_sec = ADMIN_TIMEOUT_SEC;
 
     mapper_admin_add_monitor(mon->admin, mon);
-    if (autosubscribe_flags)
+    if (autosubscribe_flags) {
         mapper_monitor_autosubscribe(mon, autosubscribe_flags);
+        mapper_monitor_request_devices(mon);
+    }
     return mon;
 }
 
@@ -117,8 +119,11 @@ int mapper_monitor_poll(mapper_monitor mon, int block_ms)
 
     if (ping_time != mon->admin->clock.next_ping) {
         // some housekeeping: check if any devices have timed out
-        mapper_db_check_device_status(&mon->db,
-                                      mon->admin->clock.now.sec - mon->timeout_sec);
+        if (mapper_db_check_device_status(&mon->db,
+                                          mon->admin->clock.now.sec
+                                          - mon->timeout_sec))
+            // if so, flush them
+            mapper_monitor_flush_db(mon, 10, 0);
     }
 
     return admin_count;
@@ -190,7 +195,7 @@ void mapper_monitor_subscribe(mapper_monitor mon, const char *device_name,
                               int subscribe_flags, int timeout)
 {
     mapper_db_device found = 0;
-    if (timeout == -1) {
+    if (timeout < 0) {
         // special case: autorenew subscription lease
         // first check if subscription already exists
         mapper_monitor_subscription s = mon->subscriptions;
@@ -204,7 +209,7 @@ void mapper_monitor_subscribe(mapper_monitor mon, const char *device_name,
             }
             s = s->next;
         }
-        if (!found) {
+        if (!s) {
             // store subscription record
             s = malloc(sizeof(struct _mapper_monitor_subscription));
             s->name = strdup(device_name);
@@ -248,7 +253,7 @@ static void mapper_monitor_unsubscribe_internal(mapper_monitor mon,
             if (temp->name)
                 free(temp->name);
             free(temp);
-            continue;
+            return;
         }
         s = &(*s)->next;
     }
@@ -440,10 +445,14 @@ static void on_device_autosubscribe(mapper_db_device dev,
 void mapper_monitor_autosubscribe(mapper_monitor mon, int autosubscribe_flags)
 {
     // TODO: remove autorenewing subscription record if necessary
-    if (autosubscribe_flags)
+    if (!mon->autosubscribe && autosubscribe_flags)
         mapper_db_add_device_callback(&mon->db, on_device_autosubscribe, mon);
-    else
+    else if (mon->autosubscribe && !autosubscribe_flags) {
         mapper_db_remove_device_callback(&mon->db, on_device_autosubscribe, mon);
+        while (mon->subscriptions) {
+            mapper_monitor_unsubscribe_internal(mon, mon->subscriptions->name, 1);
+        }
+    }
     mon->autosubscribe = autosubscribe_flags;
 }
 

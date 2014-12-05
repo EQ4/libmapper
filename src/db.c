@@ -529,13 +529,14 @@ static mapper_string_table_t sigdb_table =
 
 static property_table_value_t devdb_values[] = {
     { 's', {1}, -1, DEVDB_OFFSET(host) },
-    { 'i', {0}, -1, DEVDB_OFFSET(n_connections_in) },
-    { 'i', {0}, -1, DEVDB_OFFSET(n_connections_out) },
-    { 'i', {0}, -1, DEVDB_OFFSET(n_inputs) },
-    { 'i', {0}, -1, DEVDB_OFFSET(n_links_in) },
-    { 'i', {0}, -1, DEVDB_OFFSET(n_links_out) },
-    { 'i', {0}, -1, DEVDB_OFFSET(n_outputs) },
+    { 's', {1}, -1, DEVDB_OFFSET(lib_version) },
     { 's', {1}, -1, DEVDB_OFFSET(name) },
+    { 'i', {0}, -1, DEVDB_OFFSET(num_connections_in) },
+    { 'i', {0}, -1, DEVDB_OFFSET(num_connections_out) },
+    { 'i', {0}, -1, DEVDB_OFFSET(num_inputs) },
+    { 'i', {0}, -1, DEVDB_OFFSET(num_links_in) },
+    { 'i', {0}, -1, DEVDB_OFFSET(num_links_out) },
+    { 'i', {0}, -1, DEVDB_OFFSET(num_outputs) },
     { 'i', {0}, -1, DEVDB_OFFSET(port) },
     { 't', {0}, -1, DEVDB_OFFSET(synced) },
     { 'i', {0},  0, DEVDB_OFFSET(user_data) },
@@ -544,22 +545,23 @@ static property_table_value_t devdb_values[] = {
 
 /* This table must remain in alphabetical order. */
 static string_table_node_t devdb_nodes[] = {
-    { "host",               &devdb_values[0] },
-    { "n_connections_in",   &devdb_values[1] },
-    { "n_connections_out",  &devdb_values[2] },
-    { "n_inputs",           &devdb_values[3] },
-    { "n_links_in",         &devdb_values[4] },
-    { "n_links_out",        &devdb_values[5] },
-    { "n_outputs",          &devdb_values[6] },
-    { "name",               &devdb_values[7] },
-    { "port",               &devdb_values[8] },
-    { "synced",             &devdb_values[9] },
-    { "user_data",          &devdb_values[10] },
-    { "version",            &devdb_values[11] },
+    { "host",                &devdb_values[0] },
+    { "lib_version",         &devdb_values[1] },
+    { "name",                &devdb_values[2] },
+    { "num_connections_in",  &devdb_values[3] },
+    { "num_connections_out", &devdb_values[4] },
+    { "num_inputs",          &devdb_values[5] },
+    { "num_links_in",        &devdb_values[6] },
+    { "num_links_out",       &devdb_values[7] },
+    { "num_outputs",         &devdb_values[8] },
+    { "port",                &devdb_values[9] },
+    { "synced",              &devdb_values[10] },
+    { "user_data",           &devdb_values[11] },
+    { "version",             &devdb_values[12] },
 };
 
 static mapper_string_table_t devdb_table =
-  { devdb_nodes, 12, 12 };
+  { devdb_nodes, 13, 13 };
 
 static property_table_value_t linkdb_values[] = {
     { 's', {1}, -1,         LINKDB_OFFSET(dest_host) },
@@ -789,19 +791,23 @@ static int update_device_record_params(mapper_db_device reg,
 
     updated += update_string_if_arg(&reg->host, params, AT_IP);
 
+    updated += update_string_if_arg(&reg->lib_version, params, AT_LIB_VERSION);
+
     updated += update_int_if_arg(&reg->port, params, AT_PORT);
 
-    updated += update_int_if_arg(&reg->n_inputs, params, AT_NUM_INPUTS);
+    updated += update_int_if_arg(&reg->num_inputs, params, AT_NUM_INPUTS);
 
-    updated += update_int_if_arg(&reg->n_outputs, params, AT_NUM_OUTPUTS);
+    updated += update_int_if_arg(&reg->num_outputs, params, AT_NUM_OUTPUTS);
 
-    updated += update_int_if_arg(&reg->n_links_in, params, AT_NUM_LINKS_IN);
+    updated += update_int_if_arg(&reg->num_links_in, params, AT_NUM_LINKS_IN);
 
-    updated += update_int_if_arg(&reg->n_links_out, params, AT_NUM_LINKS_OUT);
+    updated += update_int_if_arg(&reg->num_links_out, params, AT_NUM_LINKS_OUT);
 
-    updated += update_int_if_arg(&reg->n_connections_in, params, AT_NUM_CONNECTIONS_IN);
+    updated += update_int_if_arg(&reg->num_connections_in, params,
+                                 AT_NUM_CONNECTIONS_IN);
 
-    updated += update_int_if_arg(&reg->n_connections_out, params, AT_NUM_CONNECTIONS_OUT);
+    updated += update_int_if_arg(&reg->num_connections_out, params,
+                                 AT_NUM_CONNECTIONS_OUT);
 
     updated += update_int_if_arg(&reg->version, params, AT_REV);
 
@@ -888,6 +894,8 @@ static void db_remove_device_internal(mapper_db db, mapper_db_device dev,
         free(dev->name);
     if (dev->host)
         free(dev->host);
+    if (dev->lib_version)
+        free(dev->lib_version);
     if (dev->extra)
         table_free(dev->extra, 1);
     list_remove_item(dev, (void**)&db->registered_devices);
@@ -979,81 +987,73 @@ void mapper_db_device_done(mapper_db_device_t **d)
 
 void mapper_db_dump(mapper_db db)
 {
+#ifdef DEBUG
     mapper_db_device reg = db->registered_devices;
-    trace("Registered devices:\n");
+    printf("Registered devices:\n");
     while (reg) {
-        trace("  name=%s, host=%s, port=%d\n",
-              reg->name, reg->host, reg->port);
+        printf("  name=%s, host=%s, port=%d\n", reg->name, reg->host, reg->port);
         reg = list_get_next(reg);
     }
 
     mapper_db_signal sig = db->registered_inputs;
-    trace("Registered inputs:\n");
+    printf("Registered inputs:\n");
     while (sig) {
-        trace("  name=%s%s\n",
-              sig->device_name, sig->name);
+        printf("  name=%s%s\n", sig->device_name, sig->name);
         sig = list_get_next(sig);
     }
 
     sig = db->registered_outputs;
-    trace("Registered outputs:\n");
+    printf("Registered outputs:\n");
     while (sig) {
-        trace("  name=%s%s\n",
-              sig->device_name, sig->name);
+        printf("  name=%s%s\n", sig->device_name, sig->name);
         sig = list_get_next(sig);
     }
 
-    mapper_db_connection con = db->registered_connections;
-    trace("Registered connections:\n");
-    while (con) {
-        char r[1024] = "(";
-        if (con->range_known & CONNECTION_RANGE_SRC_MIN) {
-            mapper_prop_pp(con->src_type, con->src_length, con->src_min);
-            sprintf(r+strlen(r), ", ");
-        }
-        else
-            strcat(r, "-, ");
-        if (con->range_known & CONNECTION_RANGE_SRC_MAX) {
-            mapper_prop_pp(con->src_type, con->src_length, con->src_max);
-            sprintf(r+strlen(r), ", ");
-        }
-        else
-            strcat(r, "-, ");
-        if (con->range_known & CONNECTION_RANGE_DEST_MIN) {
-            mapper_prop_pp(con->dest_type, con->dest_length, con->dest_min);
-            sprintf(r+strlen(r), ", ");
-        }
-        else
-            strcat(r, "-, ");
-        if (con->range_known & CONNECTION_RANGE_DEST_MAX) {
-            mapper_prop_pp(con->dest_type, con->dest_length, con->dest_max);
-        }
-        else
-            strcat(r, "-");
-        strcat(r, ")");
-        trace("  src_name=%s, dest_name=%s,\n"
-              "      src_type=%c, dest_type=%c,\n"
-              "      src_length=%d, dest_length=%d,\n"
-              "      bound_max=%s, bound_min=%s,\n"
-              "      range=%s,\n"
-              "      expression=%s, mode=%s, muted=%d\n",
-              con->src_name, con->dest_name, con->src_type,
-              con->dest_type, con->src_length, con->dest_length,
-              mapper_get_boundary_action_string(con->bound_max),
-              mapper_get_boundary_action_string(con->bound_min),
-              r, con->expression,
-              mapper_get_mode_type_string(con->mode),
-              con->muted);
-        con = list_get_next(con);
-    }
-
     mapper_db_link link = db->registered_links;
-    trace("Registered links:\n");
+    printf("Registered links:\n");
     while (link) {
-        trace("  source=%s, dest=%s\n",
-              link->src_name, link->dest_name);
+        printf("  source=%s, dest=%s\n", link->src_name, link->dest_name);
         link = list_get_next(link);
     }
+
+    mapper_db_connection con = db->registered_connections;
+    printf("Registered connections:\n");
+    while (con) {
+        printf("  src_name=%s, dest_name=%s,\n"
+               "      src_type=%c, dest_type=%c,\n"
+               "      src_length=%d, dest_length=%d,\n"
+               "      bound_max=%s, bound_min=%s,\n"
+               "      expression=%s, mode=%s, muted=%d\n",
+               con->src_name, con->dest_name, con->src_type,
+               con->dest_type, con->src_length, con->dest_length,
+               mapper_get_boundary_action_string(con->bound_max),
+               mapper_get_boundary_action_string(con->bound_min),
+               con->expression,
+               mapper_get_mode_type_string(con->mode),
+               con->muted);
+        if (con->range_known & CONNECTION_RANGE_SRC_MIN) {
+            printf("      src_min=");
+            mapper_prop_pp(con->src_type, con->src_length, con->src_min);
+            printf("\n");
+        }
+        if (con->range_known & CONNECTION_RANGE_SRC_MAX) {
+            printf("      src_max=");
+            mapper_prop_pp(con->src_type, con->src_length, con->src_max);
+            printf("\n");
+        }
+        if (con->range_known & CONNECTION_RANGE_DEST_MIN) {
+            printf("      dest_min=");
+            mapper_prop_pp(con->dest_type, con->dest_length, con->dest_min);
+            printf("\n");
+        }
+        if (con->range_known & CONNECTION_RANGE_DEST_MAX) {
+            printf("      dest_max=");
+            mapper_prop_pp(con->dest_type, con->dest_length, con->dest_max);
+            printf("\n");
+        }
+        con = list_get_next(con);
+    }
+#endif
 }
 
 void mapper_db_add_device_callback(mapper_db db,
@@ -1068,13 +1068,15 @@ void mapper_db_remove_device_callback(mapper_db db,
     remove_callback(&db->device_callbacks, h, user);
 }
 
-void mapper_db_check_device_status(mapper_db db, uint32_t thresh_time_sec)
+int mapper_db_check_device_status(mapper_db db, uint32_t thresh_time_sec)
 {
+    int found_unresponsive = 0;
     mapper_db_device reg = db->registered_devices;
     while (reg) {
         // check if device has "checked in" recently
         // this could be /sync ping or any sent metadata
         if (reg->synced.sec && (reg->synced.sec < thresh_time_sec)) {
+            found_unresponsive = 1;
             fptr_list cb = db->device_callbacks;
             while (cb) {
                 mapper_db_device_handler *h = cb->f;
@@ -1084,19 +1086,22 @@ void mapper_db_check_device_status(mapper_db db, uint32_t thresh_time_sec)
         }
         reg = list_get_next(reg);
     }
+
+    return found_unresponsive;
 }
 
 int mapper_db_flush(mapper_db db, uint32_t current_time,
                     uint32_t timeout, int quiet)
 {
-    mapper_db_device reg = db->registered_devices;
+    mapper_db_device reg = db->registered_devices, next;
     int removed = 0;
     while (reg) {
+        next = list_get_next(reg);
         if (reg->synced.sec && (current_time - reg->synced.sec > timeout)) {
             db_remove_device_internal(db, reg, quiet);
             removed++;
         }
-        reg = list_get_next(reg);
+        reg = next;
     }
     return removed;
 }
@@ -1116,6 +1121,9 @@ static int update_signal_record_params(mapper_db_signal sig,
 
     updated += update_string_if_different((char**)&sig->name, name);
     updated += update_string_if_different((char**)&sig->device_name, device_name);
+
+    if (!params)
+        return updated;
 
     updated += update_int_if_arg(&sig->id, params, AT_ID);
 
@@ -1552,6 +1560,10 @@ static int update_connection_record_params(mapper_db_connection con,
 
     updated += update_string_if_different(&con->src_name, src_name);
     updated += update_string_if_different(&con->dest_name, dest_name);
+
+    if (!params)
+        return updated;
+
     updated += update_char_if_arg(&con->src_type, params, AT_SRC_TYPE);
     updated += update_char_if_arg(&con->dest_type, params, AT_DEST_TYPE);
     updated += update_int_if_arg(&con->src_length, params, AT_SRC_LENGTH);
@@ -1703,7 +1715,7 @@ int mapper_db_add_or_update_connection_params(mapper_db db,
                                               mapper_message_t *params)
 {
     mapper_db_connection con;
-    int rc = 0, updated = 0;
+    int rc = 0, updated = 0, i;
 
     con = mapper_db_get_connection_by_signal_full_names(db, src_name,
                                                         dest_name);
@@ -1715,6 +1727,17 @@ int mapper_db_add_or_update_connection_params(mapper_db db,
         con->src_max = 0;
         con->extra = table_new();
         rc = 1;
+
+        // also add devices if necessary
+        char devname[128]= "/";
+        for (i = 1; i < 127 && src_name[i] != '/' ; i++)
+            devname[i] = src_name[i];
+        devname[i] = '\0';
+        mapper_db_add_or_update_device_params(db, devname, 0, 0);
+        for (i = 1; i < 127 && dest_name[i] != '/' ; i++)
+            devname[i] = dest_name[i];
+        devname[i] = '\0';
+        mapper_db_add_or_update_device_params(db, devname, 0, 0);
     }
 
     if (con) {
@@ -2247,6 +2270,10 @@ static int update_link_record_params(mapper_db_link link,
     int i, j, num_scopes = 0, updated = 0;
     updated += update_string_if_different(&link->src_name, src_name);
     updated += update_string_if_different(&link->dest_name, dest_name);
+
+    if (!params)
+        return updated;
+
     updated += update_int_if_arg(&link->src_port, params, AT_SRC_PORT);
     updated += update_int_if_arg(&link->dest_port, params, AT_DEST_PORT);
 
@@ -2271,11 +2298,6 @@ static int update_link_record_params(mapper_db_link link,
     for (i=0; i<num_scopes; i++)
         updated += (1 - mapper_db_link_add_scope(link, &a_scopes[i]->s));
 
-    if (num_scopes != link->num_scopes) {
-        link->num_scopes = num_scopes;
-        updated++;
-    }
-
     updated += mapper_msg_add_or_update_extra_params(link->extra, params);
     return updated;
 }
@@ -2294,6 +2316,10 @@ int mapper_db_add_or_update_link_params(mapper_db db,
         link = (mapper_db_link) list_new_item(sizeof(mapper_db_link_t));
         link->extra = table_new();
         rc = 1;
+
+        // also add devices if neccesary
+        mapper_db_add_or_update_device_params(db, src_name, 0, 0);
+        mapper_db_add_or_update_device_params(db, dest_name, 0, 0);
     }
 
     if (link) {

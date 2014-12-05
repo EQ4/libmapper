@@ -35,7 +35,7 @@ mapper_receiver mapper_receiver_new(mapper_device device, const char *host,
     r->props.extra = table_new();
     r->device = device;
     r->signals = 0;
-    r->n_connections = 0;
+    r->num_connections = 0;
 
     r->clock.new = 1;
     r->clock.sent.message_id = 0;
@@ -113,66 +113,18 @@ int mapper_receiver_set_from_message(mapper_receiver r, mapper_message_t *msg)
     return updated;
 }
 
-static void message_add_coerced_signal_value(lo_message m,
-                                             mapper_signal sig,
-                                             mapper_signal_instance si,
-                                             const char coerce_type)
-{
-    int i;
-    if (sig->props.type == 'f') {
-        float *v = si->value;
-        if (coerce_type == 'f') {
-            for (i = 0; i < sig->props.length; i++)
-                lo_message_add_float(m, v[i]);
-        }
-        else if (coerce_type == 'i') {
-            for (i = 0; i < sig->props.length; i++)
-                lo_message_add_int32(m, (int)v[i]);
-        }
-        else if (coerce_type == 'd') {
-            for (i = 0; i < sig->props.length; i++)
-                lo_message_add_double(m, (double)v[i]);
-        }
-    }
-    else if (sig->props.type == 'i') {
-        int *v = si->value;
-        if (coerce_type == 'i') {
-            for (i = 0; i < sig->props.length; i++)
-                lo_message_add_int32(m, v[i]);
-        }
-        else if (coerce_type == 'f') {
-            for (i = 0; i < sig->props.length; i++)
-                lo_message_add_float(m, (float)v[i]);
-        }
-        else if (coerce_type == 'd') {
-            for (i = 0; i < sig->props.length; i++)
-                lo_message_add_double(m, (double)v[i]);
-        }
-    }
-    else if (sig->props.type == 'd') {
-        double *v = si->value;
-        if (coerce_type == 'd') {
-            for (i = 0; i < sig->props.length; i++)
-                lo_message_add_double(m, (int)v[i]);
-        }
-        else if (coerce_type == 'i') {
-            for (i = 0; i < sig->props.length; i++)
-                lo_message_add_int32(m, (int)v[i]);
-        }
-        else if (coerce_type == 'f') {
-            for (i = 0; i < sig->props.length; i++)
-                lo_message_add_float(m, (float)v[i]);
-        }
-    }
-}
-
 void mapper_receiver_send_update(mapper_receiver r,
                                  mapper_signal sig,
                                  int instance_index,
                                  mapper_timetag_t tt)
 {
-    int i, count=0;
+    // TODO: check vector has_values flags, include defined elements even if !has_value?
+    int count=0;
     mapper_id_map map = sig->id_maps[instance_index].map;
+    if (!map)
+        return;
+
+    int in_scope = map ? mapper_receiver_in_scope(r, map->origin) : 0;
 
     // find the signal connection
     mapper_receiver_signal rc = r->signals;
@@ -197,60 +149,25 @@ void mapper_receiver_send_update(mapper_receiver r,
 
     c = rc->connections;
     while (c) {
-        if (c->props.mode != MO_REVERSE) {
+        if (c->props.mode != MO_REVERSE || (c->props.send_as_instance && !in_scope)) {
             c = c->next;
             continue;
         }
 
-        if (sig->props.num_instances == 1) {
-            lo_message m = lo_message_new();
-            if (!m)
-                return;
-            message_add_coerced_signal_value(m, sig, sig->id_maps[0].instance,
-                                             c->props.src_type);
-            lo_bundle_add_message(b, c->props.query_name, m);
-        }
-        else if (instance_index >= 0) {
-            mapper_signal_instance si = sig->id_maps[instance_index].instance;
-            lo_message m = lo_message_new();
-            if (!m)
-                return;
+        lo_message m = lo_message_new();
+        if (!m)
+            return;
+
+        mapper_signal_instance si = sig->id_maps[instance_index].instance;
+        message_add_coerced_signal_instance_value(m, sig, si,
+                                                  c->props.src_length,
+                                                  c->props.src_type);
+        if (c->props.send_as_instance) {
+            lo_message_add_string(m, "@instance");
             lo_message_add_int32(m, map->origin);
             lo_message_add_int32(m, map->public);
-            if (si->has_value)
-                message_add_coerced_signal_value(m, sig, si, c->props.src_type);
-            else
-                lo_message_add_nil(m);
-            lo_bundle_add_message(b, c->props.query_name, m);
         }
-        else {
-            int sent = 0;
-            for (i = 0; i < sig->id_map_length; i++) {
-                mapper_signal_instance si = sig->id_maps[i].instance;
-                if (!si)
-                    continue;
-                lo_message m = lo_message_new();
-                if (!m)
-                    return;
-                lo_message_add_int32(m, map->origin);
-                lo_message_add_int32(m, map->public);
-                if (si->has_value)
-                    message_add_coerced_signal_value(m, sig, si,
-                                                     c->props.src_type);
-                else
-                    lo_message_add_nil(m);
-                lo_bundle_add_message(b, c->props.query_name, m);
-                sent++;
-            }
-            if (!sent) {
-                // If there are no active instances, send null response
-                lo_message m = lo_message_new();
-                if (!m)
-                    return;
-                lo_message_add_nil(m);
-                lo_bundle_add_message(b, c->props.query_name, m);
-            }
-        }
+        lo_bundle_add_message(b, c->props.query_name, m);
         c = c->next;
     }
     lo_send_bundle(r->data_addr, b);
@@ -279,13 +196,16 @@ void mapper_receiver_send_released(mapper_receiver r, mapper_signal sig,
     lo_bundle b = lo_bundle_new(tt);
 
     c = rs->connections;
+    int i;
     while (c) {
         lo_message m = lo_message_new();
         if (!m)
             return;
+        for (i = 0; i < c->props.src_length; i++)
+            lo_message_add_nil(m);
+        lo_message_add_string(m, "@instance");
         lo_message_add_int32(m, map->origin);
         lo_message_add_int32(m, map->public);
-        lo_message_add_false(m);
         lo_bundle_add_message(b, c->props.src_name, m);
         c = c->next;
     }
@@ -347,14 +267,14 @@ mapper_connection mapper_receiver_add_connection(mapper_receiver r,
     c->next = rs->connections;
     rs->connections = c;
     c->parent = rs;
-    r->n_connections++;
+    r->num_connections++;
 
     return c;
 }
 
 static void mapper_receiver_free_connection(mapper_receiver r, mapper_connection c)
 {
-    int i;
+    int i, j;
     if (r && c) {
         if (c->props.src_name)
             free(c->props.src_name);
@@ -378,13 +298,20 @@ static void mapper_receiver_free_connection(mapper_receiver r, mapper_connection
         for (i=0; i<c->parent->num_instances; i++) {
             free(c->history[i].value);
             free(c->history[i].timetag);
+            if (c->num_expr_vars) {
+                for (j=0; j<c->num_expr_vars; j++) {
+                    free(c->expr_vars[i][j].value);
+                    free(c->expr_vars[i][j].timetag);
+                }
+                free(c->expr_vars[i]);
+            }
         }
+        if (c->expr_vars)
+            free(c->expr_vars);
         if (c->history)
             free(c->history);
-        if (c->blob)
-            free(c->blob);
         free(c);
-        r->n_connections--;
+        r->num_connections--;
         return;
     }
 }
@@ -481,7 +408,7 @@ int mapper_receiver_remove_connection(mapper_receiver r,
         if (*temp == c) {
             *temp = c->next;
             mapper_receiver_free_connection(r, c);
-            r->n_connections--;
+            r->num_connections--;
             found = 1;
             break;
         }

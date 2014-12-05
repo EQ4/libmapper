@@ -46,6 +46,7 @@ namespace mapper {
 
     class Property;
     class AbstractObjectProps;
+    class Db;
 
     // Helper classes to allow polymorphism on "const char *",
     // "std::string", and "int".
@@ -55,15 +56,6 @@ namespace mapper {
         string_type(const std::string &s) { _s = s.c_str(); }
         operator const char*() const { return _s; }
         const char *_s;
-    };
-
-    class num_string_type : public string_type {
-    public:
-        num_string_type(const char *s) : string_type(s) {}
-        num_string_type(const std::string &s) : string_type(s) {}
-        num_string_type(int n) { std::ostringstream ss; ss << n;
-            _p.reset(new std::string(ss.str())); _s = _p->c_str(); }
-        std::unique_ptr<std::string> _p;
     };
 
     class Admin
@@ -100,6 +92,9 @@ namespace mapper {
 
     class AbstractProps
     {
+    protected:
+        friend class Property;
+        virtual void set(mapper::Property *p) = 0;
     public:
         virtual void set(mapper::Property p) = 0;
         virtual void remove(const string_type &name) = 0;
@@ -110,25 +105,29 @@ namespace mapper {
     public:
         template <typename T>
         Property(const string_type &_name, T _value)
-            { name = _name; _set(_value); parent = NULL; }
+            { name = _name; _set(_value); parent = NULL; owned = 0; }
         template <typename T>
         Property(const string_type &_name, T& _value, int _length)
-            { name = _name; _set(_value, _length); parent = NULL; }
+            { name = _name; _set(_value, _length); parent = NULL; owned = 0; }
         template <typename T>
         Property(const string_type &_name, std::vector<T> _value)
-            { name = _name; _set(_value); parent = NULL; }
+            { name = _name; _set(_value); parent = NULL; owned = 0; }
         template <typename T>
         Property(const string_type &_name, char _type, T& _value, int _length)
-            { name = _name; _set(_type, _value, _length); parent = NULL; }
+            { name = _name; _set(_type, _value, _length); parent = NULL; owned = 0; }
+
+        ~Property()
+            { maybe_free(); }
+
         template <typename T>
         void set(T _value)
-            { _set(_value); if (parent) parent->set(*this); }
+            { maybe_free(); _set(_value); if (parent) parent->set(this); }
         template <typename T>
         void set(T& _value, int _length)
-            { _set(_value, _length); if (parent) parent->set(*this); }
+            { maybe_free(); _set(_value, _length); if (parent) parent->set(this); }
         template <typename T>
         void set(std::vector<T> _value)
-            { _set(_value); if (parent) parent->set(*this); }
+            { maybe_free(); _set(_value); if (parent) parent->set(this); }
 
         operator const void*() const
             { return value; }
@@ -144,20 +143,28 @@ namespace mapper {
     protected:
         friend class AbstractDeviceProps;
         friend class AbstractSignalProps;
+        friend class Db;
         Property(const string_type &_name, char _type, const void *_value,
                  int _length, const AbstractObjectProps *_parent)
         {
             name = _name;
             _set(_type, _value, _length);
             parent = (AbstractProps*)_parent;
+            owned = 0;
         }
+        Property()
+            { name = 0; type = 0; length = 0; owned = 0; }
     private:
         union {
-            int i;
-            float f;
             double d;
+            float f;
+            int i;
             char c;
         };
+        int owned;
+
+        void maybe_free()
+            { if (owned && value) free((void*)value); owned = 0; }
         void _set(int _value)
             { i = _value; length = 1; type = 'i'; value = &i; }
         void _set(float _value)
@@ -166,18 +173,107 @@ namespace mapper {
             { d = _value; length = 1; type = 'd'; value = &d; }
         void _set(char _value)
             { c = _value; length = 1; type = 'c'; value = &c; }
-        void _set(const char *_value)
+        void _set(const string_type &_value)
             { value = _value; length = 1; type = 's'; }
-        void _set(int *_value, int _length)
+        void _set(int _value[], int _length)
             { value = _value; length = _length; type = 'i'; }
-        void _set(float *_value, int _length)
+        void _set(float _value[], int _length)
             { value = _value; length = _length; type = 'f'; }
-        void _set(double *_value, int _length)
+        void _set(double _value[], int _length)
             { value = _value; length = _length; type = 'd'; }
-        void _set(char *_value, int _length)
+        void _set(char _value[], int _length)
             { value = _value; length = _length; type = 'c'; }
-        void _set(char **_value, int _length)
+        void _set(const char *_value[], int _length)
             { value = _value; length = _length; type = 's'; }
+        template <size_t N>
+        void _set(std::array<int, N>& _value)
+        {
+            if (!_value.empty()) {
+                value = _value.data();
+                length = N;
+                type = 'i';
+            }
+            else
+                length = 0;
+        }
+        template <size_t N>
+        void _set(std::array<float, N>& _value)
+        {
+            if (!_value.empty()) {
+                value = _value.data();
+                length = N;
+                type = 'f';
+            }
+            else
+                length = 0;
+        }
+        template <size_t N>
+        void _set(std::array<double, N>& _value)
+        {
+            if (!_value.empty()) {
+                value = _value.data();
+                length = N;
+                type = 'd';
+            }
+            else
+                length = 0;
+        }
+        template <size_t N>
+        void _set(std::array<char, N>& _value)
+        {
+            if (!_value.empty()) {
+                value = _value.data();
+                length = N;
+                type = 'c';
+            }
+            else
+                length = 0;
+        }
+        template <size_t N>
+        void _set(std::array<const char*, N>& _value)
+        {
+            if (!_value.empty()) {
+                value = _value.data();
+                length = N;
+                type = 's';
+            }
+            else
+                length = 0;
+        }
+        template <size_t N>
+        void _set(std::array<std::string, N>& _values)
+        {
+            length = N;
+            type = 's';
+            if (length == 1) {
+                value = _values[0].c_str();
+            }
+            else if (length > 1) {
+                // need to copy string array
+                char **temp = (char**)malloc(sizeof(char*) * length);
+                for (i = 0; i < length; i++) {
+                    temp[i] = (char*)_values[i].c_str();
+                }
+                value = temp;
+                owned = 1;
+            }
+        }
+        void _set(std::string _values[], int _length)
+        {
+            length = _length;
+            type = 's';
+            if (length == 1) {
+                value = _values[0].c_str();
+            }
+            else if (length > 1) {
+                // need to copy string array
+                value = malloc(sizeof(char*) * length);
+                for (i = 0; i < length; i++) {
+                    ((char**)value)[i] = (char*)_values[i].c_str();
+                }
+                owned = 1;
+            }
+        }
         void _set(std::vector<int> _value)
             { value = _value.data(); length = _value.size(); type = 'i'; }
         void _set(std::vector<float> _value)
@@ -186,8 +282,24 @@ namespace mapper {
             { value = _value.data(); length = _value.size(); type = 'd'; }
         void _set(std::vector<char> _value)
             { value = _value.data(); length = _value.size(); type = 'c'; }
-        void _set(std::vector<const string_type> _value)
+        void _set(std::vector<const char*>& _value)
             { value = _value.data(); length = _value.size(); type = 's'; }
+        void _set(std::vector<std::string>& _value)
+        {
+            length = _value.size();
+            type = 's';
+            if (length == 1) {
+                value = _value[0].c_str();
+            }
+            else if (length > 1) {
+                // need to copy string array
+                value = malloc(sizeof(char*) * length);
+                for (i = 0; i < length; i++) {
+                    ((char**)value)[i] = (char*)_value[i].c_str();
+                }
+                owned = 1;
+            }
+        }
         void _set(char _type, const void *_value, int _length)
         {
             type = _type;
@@ -199,6 +311,8 @@ namespace mapper {
 
     class AbstractObjectProps : public AbstractProps
     {
+    protected:
+        virtual void set(mapper::Property *p) = 0;
     public:
         virtual void set(mapper::Property p) = 0;
         virtual Property get(const string_type &name) const = 0;
@@ -224,10 +338,20 @@ namespace mapper {
     {
     // Reuse class for signal and database
     protected:
+        friend class Property;
+
         AbstractSignalProps(mapper_signal sig)
             { signal = sig; props = msig_properties(signal); found = 1; }
         AbstractSignalProps(mapper_db_signal sig_db)
             { signal = 0; props = sig_db; found = sig_db ? 1 : 0; }
+        void set(mapper::Property *p)
+        {
+            if (signal)
+                msig_set_property(signal, p->name, p->type,
+                                  p->type == 's' && p->length == 1
+                                  ? (void*)&p->value : (void*)p->value,
+                                  p->length);
+        }
 
     private:
         mapper_signal signal;
@@ -239,8 +363,7 @@ namespace mapper {
             { return props; }
         using AbstractObjectProps::set;
         void set(mapper::Property p)
-            { if (signal) msig_set_property(signal, p.name, p.type,
-                                           (void*)p.value, p.length); }
+            { set(&p); }
         void remove(const string_type &name)
             { if (signal) msig_remove_property(signal, name); }
         Property get(const string_type &name) const
@@ -248,8 +371,11 @@ namespace mapper {
             char type;
             const void *value;
             int length;
-            mapper_db_signal_property_lookup(props, name, &type, &value, &length);
-            return Property(name, type, value, length, this);
+            if (!mapper_db_signal_property_lookup(props, name, &type,
+                                                  &value, &length))
+                return Property(name, type, value, length, this);
+            else
+                return Property();
         }
         Property get(int index) const
         {
@@ -257,9 +383,11 @@ namespace mapper {
             char type;
             const void *value;
             int length;
-            mapper_db_signal_property_index(props, index, &name, &type,
-                                            &value, &length);
-            return Property(name, type, value, length, this);
+            if (!mapper_db_signal_property_index(props, index, &name, &type,
+                                                 &value, &length))
+                return Property(name, type, value, length, this);
+            else
+                return Property();
         }
         class Iterator : public std::iterator<std::input_iterator_tag, int>
         {
@@ -545,10 +673,20 @@ namespace mapper {
     {
     // Reuse same class for device and database
     protected:
+        friend class Property;
+
         AbstractDeviceProps(mapper_device dev) : AbstractObjectProps()
             { device = dev; props = mdev_properties(device); found = 1; }
         AbstractDeviceProps(mapper_db_device dev_db)
             { device = 0; props = dev_db; found = dev_db ? 1 : 0; }
+        void set(mapper::Property* p)
+        {
+            if (device)
+                mdev_set_property(device, p->name, p->type,
+                                  p->type == 's' && p->length == 1 ?
+                                  (void*)&p->value : (void*)p->value,
+                                  p->length);
+        }
 
     private:
         mapper_device device;
@@ -560,12 +698,7 @@ namespace mapper {
             { return props; }
         using AbstractObjectProps::set;
         void set(mapper::Property p)
-        {
-            if (device)
-                mdev_set_property(device, p.name, p.type,
-                                  p.type == 's' ? (void*)&p.value : (void*)p.value,
-                                  p.length);
-        }
+            { set(&p); }
         void remove(const string_type &name)
             { if (device) mdev_remove_property(device, name); }
         Property get(const string_type &name) const
@@ -573,8 +706,11 @@ namespace mapper {
             char type;
             const void *value;
             int length;
-            mapper_db_device_property_lookup(props, name, &type, &value, &length);
-            return Property(name, type, value, length, this);
+            if (!mapper_db_device_property_lookup(props, name, &type,
+                                                  &value, &length))
+                return Property(name, type, value, length, this);
+            else
+                return Property();
         }
         Property get(int index) const
         {
@@ -582,9 +718,11 @@ namespace mapper {
             char type;
             const void *value;
             int length;
-            mapper_db_device_property_index(props, index, &name, &type,
-                                            &value, &length);
-            return Property(name, type, value, length, this);
+            if (!mapper_db_device_property_index(props, index, &name, &type,
+                                                 &value, &length))
+                return Property(name, type, value, length, this);
+            else
+                return Property();
         }
         class Iterator : public std::iterator<std::input_iterator_tag, int>
         {
@@ -643,8 +781,22 @@ namespace mapper {
         }
         void remove_input(Signal input)
             { if (input) mdev_remove_input(device, input); }
+        void remove_input(const string_type &name)
+        {
+            if (!name)
+                return;
+            mapper_signal input = mdev_get_input_by_name(device, name, 0);
+            mdev_remove_input(device, input);
+        }
         void remove_output(Signal output)
             { if (output) mdev_remove_output(device, output); }
+        void remove_output(const string_type &name)
+        {
+            if (!name)
+                return;
+            mapper_signal output = mdev_get_output_by_name(device, name, 0);
+            mdev_remove_output(device, output);
+        }
         int num_inputs() const
             { return mdev_num_inputs(device); }
         int num_outputs() const
@@ -855,8 +1007,11 @@ namespace mapper {
                 char type;
                 const void *value;
                 int length;
-                mapper_db_link_property_lookup(props, name, &type, &value, &length);
-                return Property(name, type, value, length);
+                if (!mapper_db_link_property_lookup(props, name, &type,
+                                                    &value, &length))
+                    return Property(name, type, value, length);
+                else
+                    return Property();
             }
             Property get(int index) const
             {
@@ -864,9 +1019,11 @@ namespace mapper {
                 char type;
                 const void *value;
                 int length;
-                mapper_db_link_property_index(props, index, &name, &type,
-                                              &value, &length);
-                return Property(name, type, value, length);
+                if (!mapper_db_link_property_index(props, index, &name, &type,
+                                                   &value, &length))
+                    return Property(name, type, value, length);
+                else
+                    return Property();
             }
             class Iterator : public std::iterator<std::input_iterator_tag, int>
             {
@@ -896,6 +1053,8 @@ namespace mapper {
             private:
                 mapper_db_link *link;
             };
+        protected:
+            void set(Property *p) {}
         private:
             mapper_db_link props;
             int owned;
@@ -1015,9 +1174,11 @@ namespace mapper {
                 char type;
                 const void *value;
                 int length;
-                mapper_db_connection_property_lookup(props, name, &type,
-                                                     &value, &length);
-                return Property(name, type, value, length);
+                if (!mapper_db_connection_property_lookup(props, name, &type,
+                                                          &value, &length))
+                    return Property(name, type, value, length);
+                else
+                    return Property();
             }
             Property get(int index) const
             {
@@ -1025,9 +1186,11 @@ namespace mapper {
                 char type;
                 const void *value;
                 int length;
-                mapper_db_connection_property_index(props, index, &name, &type,
-                                                    &value, &length);
-                return Property(name, type, value, length);
+                if (!mapper_db_connection_property_index(props, index, &name,
+                                                         &type, &value, &length))
+                    return Property(name, type, value, length);
+                else
+                    return Property();
             }
             class Iterator : public std::iterator<std::input_iterator_tag, int>
             {
@@ -1057,6 +1220,8 @@ namespace mapper {
             private:
                 mapper_db_connection *con;
             };
+        protected:
+            void set(mapper::Property *p) {}
         private:
             mapper_db_connection props;
             int owned;

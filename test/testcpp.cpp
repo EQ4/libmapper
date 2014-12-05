@@ -4,6 +4,7 @@
 #include <arpa/inet.h>
 #include <cstdio>
 #include <cstdlib>
+#include <array>
 
 #include <mapper/mapper_cpp.h>
 
@@ -61,15 +62,15 @@ int main(int argc, char ** argv)
     dev.add_input("in3", 2, 'i', 0, 0, 0, 0, 0);
     dev.add_input("in4", 2, 'i', 0, 0, 0, insig_handler, 0);
 
-    sig = dev.add_output("out1", 1, 'f', "na", 0, 0);
-    dev.remove_output(sig);
-    dev.add_output("out2", 3, 'd', "meters", 0, 0);
+    dev.add_output("out1", 1, 'f', "na", 0, 0);
+    dev.remove_output("out1");
+    sig = dev.add_output("out2", 3, 'd', "meters", 0, 0);
 
     while (!dev.ready()) {
         dev.poll(100);
     }
 
-    std::cout << "device " << dev.name() << "ready..." << std::endl;
+    std::cout << "device " << dev.name() << " ready..." << std::endl;
     std::cout << "  ordinal: " << dev.ordinal() << std::endl;
     std::cout << "  id: " << dev.id() << std::endl;
     std::cout << "  interface: " << dev.interface() << std::endl;
@@ -78,7 +79,6 @@ int main(int argc, char ** argv)
         std::cout << "  host: " << inet_ntoa(*a) << std::endl;
     std::cout << "  port: " << dev.port() << std::endl;
     std::cout << "  num_fds: " << dev.num_fds() << std::endl;
-//    std::cout << "  clock_offset: " << dev.clock_offset() << std::endl;
     std::cout << "  num_inputs: " << dev.num_inputs() << std::endl;
     std::cout << "  num_outputs: " << dev.num_outputs() << std::endl;
     std::cout << "  num_links_in: " << dev.num_links_in() << std::endl;
@@ -96,7 +96,38 @@ int main(int argc, char ** argv)
     std::cout << std::endl;
 
     // can also access properties like this
-    dev.property("foo").set("bar");
+    dev.property("name").print();
+    std::cout << std::endl;
+
+    // test std::array<std::string>
+    std::array<std::string, 3> array1 = {{"one", "two", "three"}};
+    dev.property("foo").set(array1);
+    dev.property("foo").print();
+    std::cout << std::endl;
+
+    // test std::array<const char*>
+    std::array<const char*, 3> array2 = {{"four", "five", "six"}};
+    dev.property("foo").set(array2);
+    dev.property("foo").print();
+    std::cout << std::endl;
+
+    // test plain array of const char*
+    const char* array3[3] = {"seven", "eight", "nine"};
+    dev.property("foo").set(array3, 3);
+    dev.property("foo").print();
+    std::cout << std::endl;
+
+    // test std::vector<const char*>
+    const char *array4[3] = {"ten", "eleven", "twelve"};
+    std::vector<const char*> vector1(array4, std::end(array4));
+    dev.property("foo").set(vector1);
+    dev.property("foo").print();
+    std::cout << std::endl;
+
+    // test std::vector<std::string>
+    const char *array5[3] = {"thirteen", "14", "15"};
+    std::vector<std::string> vector2(array5, std::end(array5));
+    dev.property("foo").set(vector2);
     dev.property("foo").print();
     std::cout << std::endl;
 
@@ -105,6 +136,7 @@ int main(int argc, char ** argv)
     dev.property("temp").print();
     std::cout << std::endl;
 
+    // access property using overloaded index operator
     dev.properties()["temp"].print();
     std::cout << std::endl;
 
@@ -136,7 +168,7 @@ int main(int argc, char ** argv)
 
     std::vector <double> v(3);
     while (i++ < 100) {
-        dev.poll(100);
+        dev.poll(10);
         mon.poll();
         v[i%3] = i;
         sig.update(v);

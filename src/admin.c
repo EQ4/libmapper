@@ -30,6 +30,9 @@
 #include "config.h"
 #include <mapper/mapper.h>
 
+// set to 1 to force mesh comms to use admin bus instead for debugging
+#define FORCE_ADMIN_TO_BUS      0
+
 #define BUNDLE_DEST_SUBSCRIBERS (void*)-1
 #define BUNDLE_DEST_BUS         0
 
@@ -155,7 +158,7 @@ struct handler_method_assoc {
 
 // handlers needed by both "devices" and "monitors"
 static struct handler_method_assoc admin_bus_handlers[] = {
-    {ADM_LOGOUT,                NULL,       handler_logout},
+    {ADM_LOGOUT,                 NULL,      handler_logout},
 };
 const int N_ADMIN_BUS_HANDLERS =
     sizeof(admin_bus_handlers)/sizeof(admin_bus_handlers[0]);
@@ -175,7 +178,6 @@ static struct handler_method_assoc device_bus_handlers[] = {
     {ADM_LINK_TO,               NULL,       handler_device_linkTo},
     {ADM_LINKED,                NULL,       handler_device_linked},
     {ADM_LINK_MODIFY,           NULL,       handler_device_link_modify},
-    {ADM_LINK_PING,             "si",       handler_device_link_ping},
     {ADM_UNLINK,                NULL,       handler_device_unlink},
     {ADM_UNLINKED,              NULL,       handler_device_unlinked},
     {ADM_SUBSCRIBE,             NULL,       handler_device_subscribe},
@@ -554,6 +556,9 @@ void mapper_admin_send_bundle(mapper_admin admin)
 {
     if (!admin->bundle)
         return;
+#if FORCE_ADMIN_TO_BUS
+    lo_send_bundle_from(admin->bus_addr, admin->mesh_server, admin->bundle);
+#else
     if (admin->bundle_dest == BUNDLE_DEST_SUBSCRIBERS) {
         mapper_admin_subscriber *s = &admin->subscribers;
         if (*s) {
@@ -581,6 +586,7 @@ void mapper_admin_send_bundle(mapper_admin admin)
     else {
         lo_send_bundle_from(admin->bundle_dest, admin->mesh_server, admin->bundle);
     }
+#endif
     lo_bundle_free_messages(admin->bundle);
     admin->bundle = 0;
 }
@@ -760,20 +766,27 @@ static void mapper_admin_maybe_send_ping(mapper_admin admin, int force)
     // some housekeeping: periodically check if our links are still active
     mapper_router router = md->routers;
     while (router) {
+        if (router->props.dest_name_hash == md->props.name_hash) {
+            // don't bother sending pings to self
+            router = router->next;
+            continue;
+        }
         mapper_sync_clock sync = &router->clock;
         elapsed = (sync->response.timetag.sec
                    ? clock->now.sec - sync->response.timetag.sec : 0);
-        if (elapsed > ADMIN_TIMEOUT_SEC) {
-            trace("<%s> Lost contact with linked destination device %s"
-                  "(%d seconds since sync).\n", mdev_name(md),
-                  router->props.dest_name, elapsed);
-
+        if (md->link_timeout_sec && elapsed > md->link_timeout_sec) {
             if (sync->response.message_id > 0) {
+                trace("<%s> Lost contact with linked device %s "
+                      "(%d seconds since sync).\n", mdev_name(md),
+                      router->props.dest_name, elapsed);
                 // tentatively mark link as expired
                 sync->response.message_id = -1;
                 sync->response.timetag.sec = clock->now.sec;
             }
             else {
+                trace("<%s> Removing link to unresponsive device %s "
+                      "(%d seconds since warning).\n", mdev_name(md),
+                      router->props.dest_name, elapsed);
                 // Call the local link handler if it exists
                 if (md->link_cb)
                     md->link_cb(md, &router->props, MDEV_LOCAL_DESTROYED,
@@ -805,8 +818,12 @@ static void mapper_admin_maybe_send_ping(mapper_admin admin, int force)
             else
                 lo_message_add_double(m, 0.);
             // need to send immediately
-            lo_bundle_add_message(b, admin_msg_strings[ADM_LINK_PING], m);
+#if FORCE_ADMIN_TO_BUS
+            lo_send_bundle_from(admin->bus_addr, admin->mesh_server, b);
+#else
             lo_send_bundle_from(router->admin_addr, admin->mesh_server, b);
+#endif
+            lo_bundle_add_message(b, admin_msg_strings[ADM_LINK_PING], m);
             mapper_timetag_cpy(&sync->sent.timetag, lo_bundle_get_timestamp(b));
             lo_bundle_free_messages(b);
         }
@@ -815,20 +832,27 @@ static void mapper_admin_maybe_send_ping(mapper_admin admin, int force)
 
     mapper_receiver receiver = md->receivers;
     while (receiver) {
+        if (receiver->props.src_name_hash == md->props.name_hash) {
+            // don't bother sending pings to self
+            receiver = receiver->next;
+            continue;
+        }
         mapper_sync_clock sync = &receiver->clock;
         elapsed = (sync->response.timetag.sec
                    ? clock->now.sec - sync->response.timetag.sec : 0);
-        if (elapsed > ADMIN_TIMEOUT_SEC) {
-            trace("<%s> Lost contact with linked source device %s"
-                  "(%d seconds since sync).\n", mdev_name(md),
-                  receiver->props.src_name, elapsed);
-
+        if (md->link_timeout_sec && elapsed > md->link_timeout_sec) {
             if (sync->response.message_id > 0) {
+                trace("<%s> Lost contact with linked device %s "
+                      "(%d seconds since sync).\n", mdev_name(md),
+                      receiver->props.src_name, elapsed);
                 // tentatively mark link as expired
                 sync->response.message_id = -1;
                 sync->response.timetag.sec = clock->now.sec;
             }
             else {
+                trace("<%s> Removing link from unresponsive device %s "
+                      "(%d seconds since warning).\n", mdev_name(md),
+                      receiver->props.dest_name, elapsed);
                 // Call the local link handler if it exists
                 if (md->link_cb)
                     md->link_cb(md, &receiver->props, MDEV_LOCAL_DESTROYED,
@@ -860,8 +884,12 @@ static void mapper_admin_maybe_send_ping(mapper_admin admin, int force)
             else
                 lo_message_add_double(m, 0.);
             // need to send immediately
-            lo_bundle_add_message(b, admin_msg_strings[ADM_LINK_PING], m);
+#ifdef FORCE_ADMIN_TO_BUS
+            lo_send_bundle_from(admin->bus_addr, admin->mesh_server, b);
+#else
             lo_send_bundle_from(receiver->admin_addr, admin->mesh_server, b);
+#endif
+            lo_bundle_add_message(b, admin_msg_strings[ADM_LINK_PING], m);
             mapper_timetag_cpy(&sync->sent.timetag, lo_bundle_get_timestamp(b));
             lo_bundle_free_messages(b);
         }
@@ -1119,10 +1147,10 @@ static void mapper_admin_send_inputs(mapper_admin admin, mapper_device md,
 {
     if (min < 0)
         min = 0;
-    else if (min > md->props.n_inputs)
+    else if (min > md->props.num_inputs)
         return;
-    if (max < 0 || max > md->props.n_inputs)
-        max = md->props.n_inputs-1;
+    if (max < 0 || max > md->props.num_inputs)
+        max = md->props.num_inputs-1;
 
     int i = min;
     for (; i <= max; i++)
@@ -1134,10 +1162,10 @@ static void mapper_admin_send_outputs(mapper_admin admin, mapper_device md,
 {
     if (min < 0)
         min = 0;
-    else if (min > md->props.n_outputs)
+    else if (min > md->props.num_outputs)
         return;
-    if (max < 0 || max > md->props.n_outputs)
-        max = md->props.n_outputs-1;
+    if (max < 0 || max > md->props.num_outputs)
+        max = md->props.num_outputs-1;
 
     int i = min;
     for (; i <= max; i++)
@@ -1316,6 +1344,8 @@ static int handler_device(const char *path, const char *types,
 
     const char *name = &argv[0]->s;
 
+    trace("<monitor> got /device %s + %i arguments\n", name, argc-1);
+
     mapper_message_t params;
     mapper_msg_parse_params(&params, path, &types[1],
                             argc-1, &argv[1]);
@@ -1361,7 +1391,8 @@ static int handler_logout(const char *path, const char *types,
 
     char *name = &argv[0]->s;
 
-    trace("got /logout %s\n", name);
+    trace("<%s> got /logout %s\n",
+          (md && md->ordinal.locked) ? mdev_name(md) : "monitor", name);
 
     if (mon) {
         mapper_db_remove_device_by_name(db, name);
@@ -1372,26 +1403,6 @@ static int handler_logout(const char *path, const char *types,
 
     // If device exists and is registered
     if (md && md->ordinal.locked) {
-        /* Parse the ordinal from the complete name which is in the
-         * format: /<name>.<n> */
-        s = name;
-        if (*s++ != '/')
-            return 0;
-        while (*s != '.' && *s++) {
-        }
-        ordinal = atoi(++s);
-
-        // If device name matches
-        strtok(name, ".");
-        name++;
-        if (strcmp(name, md->props.identifier) == 0) {
-            // if registered ordinal is within my block, free it
-            diff = ordinal - md->ordinal.value;
-            if (diff > 0 && diff < 9) {
-                md->ordinal.suggestion[diff-1] = 0;
-            }
-        }
-
         // Check if we have any links to this device, if so remove them
         mapper_router router =
             mapper_router_find_by_dest_name(md->routers, name);
@@ -1400,6 +1411,9 @@ static int handler_logout(const char *path, const char *types,
             if (md->link_cb)
                 md->link_cb(md, &router->props, MDEV_LOCAL_DESTROYED,
                             md->link_cb_userdata);
+
+            trace("<%s> Removing link to expired device %s.\n",
+                  mdev_name(md), router->props.dest_name);
 
             mdev_remove_router(md, router);
 
@@ -1417,12 +1431,34 @@ static int handler_logout(const char *path, const char *types,
                 md->link_cb(md, &receiver->props, MDEV_LOCAL_DESTROYED,
                             md->link_cb_userdata);
 
+            trace("<%s> Removing link from expired device %s.\n",
+                  mdev_name(md), receiver->props.dest_name);
+
             mdev_remove_receiver(md, receiver);
 
             // Inform subscribers
             mapper_admin_set_bundle_dest_subscribers(admin, SUB_DEVICE_LINKS_IN);
             mapper_admin_bundle_message(admin, ADM_UNLINKED, 0, "ss",
                                         name, mdev_name(md));
+        }
+
+        /* Parse the ordinal from the complete name which is in the
+         * format: /<name>.<n> */
+        s = name;
+        if (*s++ != '/')
+            return 0;
+        while (*s != '.' && *s++) {}
+        ordinal = atoi(++s);
+
+        // If device name matches
+        strtok(name, ".");
+        name++;
+        if (strcmp(name, md->props.identifier) == 0) {
+            // if registered ordinal is within my block, free it
+            diff = ordinal - md->ordinal.value;
+            if (diff > 0 && diff < 9) {
+                md->ordinal.suggestion[diff-1] = 0;
+            }
         }
     }
 
@@ -1994,7 +2030,7 @@ static int handler_device_linked(const char *path, const char *types,
         return 0;
     if (mon)
         mapper_db_add_or_update_link_params(db, src_name, dest_name, &params);
-    if (!md || strcmp(mdev_name(md), dest_name))
+    if (!md || !mdev_name(md) || strcmp(mdev_name(md), dest_name))
         return 0;
 
     // Add a receiver data structure
@@ -2223,7 +2259,7 @@ static int handler_device_unlinked(const char *path, const char *types,
             mapper_db_get_link_by_src_dest_names(db, src_name, dest_name));
     }
 
-    if (md) {
+    if (md && mdev_name(md)) {
         trace("<%s> got /unlinked %s %s + %i arguments\n",
               mdev_name(md), src_name, dest_name, argc-2);
 
@@ -2562,8 +2598,8 @@ static int handler_signal_connected(const char *path, const char *types,
                                                   dest_name, &params);
     }
 
-    if (!md || prefix_cmp(dest_name, mdev_name(md),
-                          &dest_signal_name))
+    if (!md || !mdev_name(md) || prefix_cmp(dest_name, mdev_name(md),
+                                            &dest_signal_name))
         return 0;
 
     trace("<%s> got /connected %s %s + %d arguments\n",
@@ -2840,8 +2876,8 @@ static int handler_signal_disconnected(const char *path, const char *types,
                                                           dest_name));
     }
 
-    if (!md || prefix_cmp(dest_name, mdev_name(md),
-                          &dest_signal_name))
+    if (!md || !mdev_name(md) || prefix_cmp(dest_name, mdev_name(md),
+                                            &dest_signal_name))
         return 0;
 
     src_signal_name = strchr(src_name+1, '/');
@@ -2908,22 +2944,6 @@ static int handler_device_link_ping(const char *path,
     mapper_clock_now(clock, &now);
     lo_timetag then = lo_message_get_timestamp(msg);
 
-    // find link
-    // check timetag exchange
-    // if new clock
-            // set offset to recvd timestamp diff
-            // set latency to calc latency
-            // set jitter to calc latency
-    // else if timetag is in the future
-            // adopt immediately
-            // set latency to 0
-            // adjust jitter
-    // else
-            // update offset
-            // update latency
-            // update jitter
-            // future: update rate?
-
     mapper_router router = mapper_router_find_by_dest_hash(md->routers,
                                                            argv[0]->i);
     if (router) {
@@ -2932,8 +2952,8 @@ static int handler_device_link_ping(const char *path,
             double elapsed = mapper_timetag_difference(now, router->clock.sent.timetag);
             // assume symmetrical latency
             double latency = (elapsed - argv[3]->d) * 0.5;
-            // difference between remote and local clocks (no latency compensation)
-            double offset = mapper_timetag_difference(then, now) + latency;
+            // difference between remote and local clocks (latency compensated)
+            double offset = mapper_timetag_difference(now, then) - latency;
 
             if (latency < 0) {
                 trace("error: latency cannot be < 0");
@@ -2943,10 +2963,11 @@ static int handler_device_link_ping(const char *path,
             if (router->clock.new == 1) {
                 router->clock.offset = offset;
                 router->clock.latency = latency;
-                router->clock.jitter = 0;//latency;
+                router->clock.jitter = 0;
                 router->clock.new = 0;
             }
             else {
+                router->clock.jitter = router->clock.jitter * 0.9 + fabs(router->clock.latency - latency) * 0.1;
                 if (offset > router->clock.offset) {
                     // remote timetag is in the future
                     router->clock.offset = offset;
@@ -2954,9 +2975,8 @@ static int handler_device_link_ping(const char *path,
                 else if (latency < router->clock.latency + router->clock.jitter
                          && latency > router->clock.latency - router->clock.jitter) {
                     router->clock.offset = router->clock.offset * 0.9 + offset * 0.1;
+                    router->clock.latency = router->clock.latency * 0.9 + latency * 0.1;
                 }
-                router->clock.jitter = router->clock.jitter * 0.9 + fabs(router->clock.latency - latency) * 0.1;
-                router->clock.latency = router->clock.latency * 0.9 + latency * 0.1;
             }
         }
 
@@ -2973,8 +2993,8 @@ static int handler_device_link_ping(const char *path,
             double elapsed = mapper_timetag_difference(now, receiver->clock.sent.timetag);
             // assume symmetrical latency
             double latency = (elapsed - argv[3]->d) * 0.5;
-            // difference between remote and local clocks (no latency compensation)
-            double offset = mapper_timetag_difference(then, now) + latency;
+            // difference between remote and local clocks (latency compensated)
+            double offset = mapper_timetag_difference(now, then) - latency;
 
             if (latency < 0) {
                 trace("error: latency cannot be < 0");
@@ -2984,10 +3004,11 @@ static int handler_device_link_ping(const char *path,
             if (receiver->clock.new == 1) {
                 receiver->clock.offset = offset;
                 receiver->clock.latency = latency;
-                receiver->clock.jitter = 0;//latency;
+                receiver->clock.jitter = 0;
                 receiver->clock.new = 0;
             }
             else {
+                receiver->clock.jitter = receiver->clock.jitter * 0.9 + fabs(receiver->clock.latency - latency) * 0.1;
                 if (offset > receiver->clock.offset) {
                     // remote timetag is in the future
                     receiver->clock.offset = offset;
@@ -2995,9 +3016,8 @@ static int handler_device_link_ping(const char *path,
                 else if (latency < receiver->clock.latency + receiver->clock.jitter
                          && latency > receiver->clock.latency - receiver->clock.jitter) {
                     receiver->clock.offset = receiver->clock.offset * 0.9 + offset * 0.1;
+                    receiver->clock.latency = receiver->clock.latency * 0.9 + latency * 0.1;
                 }
-                receiver->clock.jitter = receiver->clock.jitter * 0.9 + fabs(receiver->clock.latency - latency) * 0.1;
-                receiver->clock.latency = receiver->clock.latency * 0.9 + latency * 0.1;
             }
         }
 
@@ -3021,20 +3041,18 @@ static int handler_sync(const char *path,
         return 0;
 
     mapper_db_device reg = 0;
-    if (types[0] == 's' || types[0] == 'S')
-        reg = mapper_db_get_device_by_name(&mon->db, &argv[0]->s);
-    else if (types[0] == 'i')
-        reg = mapper_db_get_device_by_name_hash(&mon->db, argv[0]->i);
-    else
-        return 0;
-
-    if (!reg) {
-        // only create device record after requesting more information
-        if (mon->autosubscribe)
+    if (types[0] == 's' || types[0] == 'S') {
+        if ((reg = mapper_db_get_device_by_name(&mon->db, &argv[0]->s)))
+            mapper_timetag_cpy(&reg->synced, lo_message_get_timestamp(msg));
+        else if (mon->autosubscribe) {
+            // only create device record after requesting more information
             mapper_monitor_subscribe(mon, &argv[0]->s, mon->autosubscribe, -1);
+        }
     }
-    else
-        mapper_timetag_cpy(&reg->synced, lo_message_get_timestamp(msg));
+    else if (types[0] == 'i') {
+        if ((reg = mapper_db_get_device_by_name_hash(&mon->db, argv[0]->i)))
+            mapper_timetag_cpy(&reg->synced, lo_message_get_timestamp(msg));
+    }
 
     return 0;
 }
